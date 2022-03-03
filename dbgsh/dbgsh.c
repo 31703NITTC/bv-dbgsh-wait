@@ -41,27 +41,9 @@
 #define PUTCHAR(c) putchar (c), fflush (stdout)
 #define ECHO() system ("stty echo icanon")
 #endif
-#include "../common/call_vmm.h"
 
-#include "../common/file.h"
-#include "../common/lineAnalizer.h"
-
-static int
-vmcall_dbgsh (int c)
-{
-	call_vmm_function_t f;
-	call_vmm_arg_t a;
-	call_vmm_ret_t r;
-
-	CALL_VMM_GET_FUNCTION ("dbgsh", &f);
-	if (!call_vmm_function_callable (&f)) {
-		fprintf (stderr, "vmmcall \"dbgsh\" failed\n");
-		exit (1);
-	}
-	a.rbx = (long)c;
-	call_vmm_call_function (&f, &a, &r);
-	return (int)r.rax;
-}
+#include "lib_dbgsh/file.h"
+#include "lib_dbgsh/lineAnalizer.h"
 
 void
 e (void)
@@ -77,46 +59,113 @@ main (int argc, char **argv)
 	FILE *infp;
 
 	if (argc >= 2) {
-		fp = fopen (argv[1], "w");
+		infp = fopen (argv[1], "r");
 	} else {
-		fp = NULL;
+		infp = NULL;
 	}
 
-	infp = fopen ("in.txt", "r");
-	char **lines = File_Read(infp);
+	fp = NULL; // 
+	char **lines = ReadFile2Lines(infp);
 	int lines_ptr=0, line_ptr=0;
+	/**
+	 * return value of function "AnalizeLine"
+	 *  0 : called command done
+	 *  1 : called command missed
+	 *  2 : throw command
+	 * -1 : building command
+	 * -2 : press ^C
+	 */
 	int ALret = -1;
+	/**
+	 * file or stdin
+	 * 1 : file
+	 * 0 : stdin
+	 */
+	int fmode = 1;
 	fclose(infp);
 
-	vmcall_dbgsh (-1);
+	edit_string *line = init_edit_string();
+	char _c;
+	int ESline = 0;
+
+	//vmcall_dbgsh (-1);
 	atexit (e);
 	NOECHO ();
 	s = -1;
 	for (;;) {
-		r = vmcall_dbgsh (s);
-		if (r == 0x100 | '\n') {
-			vmcall_dbgsh (0);
+		r = 0;
+		// r = vmcall_dbgsh(s);
+		if (r == (0x100 | '\n')) {
+			//vmcall_dbgsh (0);
+			printf("\033[36mcall exit\n\033[0m");
 			exit (0);
 		}
 		s = -1;
 		if (r == 0) {
 			//add code
-			if(lines[lines_ptr] != NULL){
-				if(ALret==-1){
-					ALret = AnalizeLine(lines[lines_ptr]);
+			if(fmode){
+				if(lines[lines_ptr] != NULL){
+					if(ALret==-1){
+						ALret = AnalizeLine(lines[lines_ptr]);
+					}
+					if(ALret == 3 && lines[lines_ptr][line_ptr] != '\0'){
+						// throw command to bitvisor
+						s = lines[lines_ptr][line_ptr++];
+					}else if(ALret != -2){
+						// line fin
+						ALret = -1;
+						line_ptr = 0;
+						lines_ptr++;
+						s = '\n';
+					}else{
+						s = 3;
+					}
+				}else{
+					printf("\033[36mfile end\n\033[0m");
+					fflush(stdin);
+					fmode = 0;
 				}
-				if(ALret == 2 && lines[lines_ptr][line_ptr] != '\0'){
-					s = lines[lines_ptr][line_ptr++];
-				}else if(ALret == 2){
-					ALret = -1;
-					line_ptr = 0;
-					lines_ptr++;
-					s = '\n';
-				}
-			}else{
-				s = GETCHAR ();
 			}
-			//入力介入
+			if(!fmode){
+				if(ALret == -1) printf("> ");
+				while(ALret == -1){
+					s = GETCHAR ();
+					if(s == 3){
+						printf("^C\n");
+						ALret = -2;
+					}else if(s == '\0' || s == -32){
+						// Nothing
+					}else if(s == '\b'){
+						if(line->cur > 0){
+							printf("\033[1D\033[0K");
+							PB_edit_string(&_c, line);
+						}
+					}else if(s == '\t'){
+						PUTCHAR(s);
+						while(line->cur%8!=0) append_edit_string(' ', line);
+					}else if(s=='\n' || s=='\r'){
+						PUTCHAR('\n');
+						ALret = AnalizeLine(line->str);
+					}else{
+						PUTCHAR(s);
+						append_edit_string(s, line);
+					}
+				}
+				if(ALret == 3 && line->str[ESline] != '\0'){
+					s = line->str[ESline++];
+				}else if(ALret != -2){
+					ALret = -1;
+					ESline = 0;
+					s = '\n';
+					reinit_edit_string(line);
+				}else{
+					s = 3;
+				}
+			}
+			if (s == 3){ // 本番ではなし(bitvisorが終了を伝える)
+				return 0;
+			}
+			// add end
 			if (s == 0)
 				s |= 0x100;
 		} else if (r > 0) {
